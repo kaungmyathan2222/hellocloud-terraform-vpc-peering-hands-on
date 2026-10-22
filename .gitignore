@@ -1,0 +1,52 @@
+# =========================================================================
+# Terraform Core Files
+# =========================================================================
+
+# Local .terraform working directories (contains downloaded provider binaries and modules)
+.terraform/
+**/.terraform/*
+
+# Local execution state files. These contain plain-text infrastructure configurations
+# and potential secrets. Always use a remote backend (S3, GCS, Terraform Cloud) instead.
+*.tfstate
+*.tfstate.*
+
+# Crash logs (generated if a terraform command fails mid-execution)
+crash.log
+crash.*.log
+
+# Transient lock files created during an active 'terraform apply'
+.terraform.tfstate.lock.info
+
+# =========================================================================
+# Variables and Secrets (CRITICAL)
+# =========================================================================
+
+# Exclude variable definition files which usually house API tokens, passwords, and custom strings
+*.tfvars
+*.tfvars.json
+
+# If you use specific environment-named auto-loading variable files that contain secrets
+# (Note: Some teams commit base configs like 'common.auto.tfvars' but explicitly ignore sensitive ones)
+*.auto.tfvars
+
+# =========================================================================
+# Local Configuration and Overrides
+# =========================================================================
+
+# Ignore local configuration overrides used for ad-hoc debugging or custom resource alterations
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Ignore CLI configuration files specifying local plugin paths or token mirrors
+.terraformrc
+terraform.rc
+
+# =========================================================================
+# Optional: Generated Execution Plans
+# =========================================================================
+# If you save binary plans locally via 'terraform plan -out=tfplan', uncomment below:
+# tfplan
+# *tfplan*
