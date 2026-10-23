@@ -44,6 +44,10 @@ override.tf.json
 .terraformrc
 terraform.rc
 
+# Private keys — the lab references local EC2 key pairs; never commit them
+*.pem
+*.pem.pub
+
 # =========================================================================
 # Optional: Generated Execution Plans
 # =========================================================================
