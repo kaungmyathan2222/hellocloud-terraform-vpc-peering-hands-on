@@ -1,9 +1,10 @@
 resource "aws_instance" "backend_public_instance01" {
-  ami                    = data.aws_ami.al2023.id
-  instance_type          = var.instance_type
-  key_name               = data.aws_key_pair.my-hellocloud-keypair.key_name
-  subnet_id              = data.terraform_remote_state.network.outputs.public_subnets["public-subnet-01"]
-  vpc_security_group_ids = [data.terraform_remote_state.security.outputs.security_group_ids["public-01"]]
+  ami                         = data.aws_ami.al2023.id
+  instance_type               = var.instance_type
+  key_name                    = data.aws_key_pair.my-hellocloud-keypair.key_name
+  subnet_id                   = data.terraform_remote_state.network.outputs.public_subnets["public-subnet-01"]
+  vpc_security_group_ids      = [data.terraform_remote_state.security.outputs.security_group_ids["public-01"]]
+  associate_public_ip_address = true
   tags = {
     Name = "${var.project}-public-instance"
   }

@@ -54,3 +54,5 @@ terraform.rc
 # If you save binary plans locally via 'terraform plan -out=tfplan', uncomment below:
 # tfplan
 # *tfplan*
+
+.DS_Store
