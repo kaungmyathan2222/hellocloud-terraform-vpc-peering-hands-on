@@ -5,11 +5,11 @@ variable "region" {
 }
 
 variable "project" {
-  type = string
+  type    = string
   default = "hc-backend"
 }
 
 variable "my_ip" {
-  type = string
+  type    = string
   default = "27.130.9.112/32"
 }

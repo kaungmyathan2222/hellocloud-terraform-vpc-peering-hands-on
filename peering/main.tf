@@ -29,6 +29,14 @@ resource "aws_vpc_peering_connection" "frontend_to_backend" {
   vpc_id        = data.terraform_remote_state.hc-frontend-network.outputs.vpc_id
   auto_accept   = true
 
+  accepter {
+    allow_remote_vpc_dns_resolution = true
+  }
+
+  requester {
+    allow_remote_vpc_dns_resolution = true
+  }
+
   tags = {
     Name = "VPC Peering between hc-frontend-netwrok and hc-backend-netwrok"
   }
