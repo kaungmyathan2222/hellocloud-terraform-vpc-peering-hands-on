@@ -34,7 +34,7 @@ hc-frontend-compute       hc-backend-compute
 | Workspace | Directory | Owns |
 |---|---|---|
 | `hc-frontend-network` / `hc-backend-network` | `frontend-network/`, `backend-network/` | VPC + 3 public + 3 private subnets, IGW, regional NAT, per-AZ private route tables |
-| `hc-peering` | `peering/` | PCX + same-ordinal peer routes |
+| `hc-peering` | `peering/` | PCX (+ peer DNS resolution) + same-ordinal peer routes |
 | `hc-frontend-security` / `hc-backend-security` | `frontend-security/`, `backend-security/` | SG chain (pub-bastion → pri-01 → pri-02/03) + cross-VPC portals |
 | `hc-frontend-compute` / `hc-backend-compute` | `frontend-compute/`, `backend-compute/` | Instances (1 public AL2023 bastion + 3 private Ubuntu) |
 
@@ -81,9 +81,21 @@ same-ordinal `/24` to `/24`, never a blanket `/16`:
 Public tables and the `-01` (NAT) tables carry **no** peer route — deliberate, and the negative
 control in the evidence run proves it.
 
-DNS resolution across the peer (`aws_vpc_peering_connection_options`) is **not enabled**:
-`AllowDnsResolutionFromRemoteVpc = false` on both sides, so peer *hostnames* do not resolve.
-Cross-VPC proof below is IP-level only.
+DNS resolution across the peer is declared on the connection itself — nested `accepter {}` /
+`requester {}` blocks with `allow_remote_vpc_dns_resolution = true`, so no separate
+`aws_vpc_peering_connection_options` resource is needed:
+
+```hcl
+resource "aws_vpc_peering_connection" "frontend_to_backend" {
+  # ...
+  accepter  { allow_remote_vpc_dns_resolution = true }
+  requester { allow_remote_vpc_dns_resolution = true }
+}
+```
+
+Valid here only because both VPCs are in the same account and region; cross-account peering needs
+the separate options resource, applied by each side's owner. The evidence capture below predates
+this flag, so it is IP-level only.
 
 ## Security model
 
@@ -95,15 +107,16 @@ never `aws_security_group_rule`, never inline rule blocks.
 |---|---|---|
 | `pub-sgp-01` | SSH + ICMP from **operator IP /32** | allow-all |
 | `pri-sgp-01` | SSH + ICMP from `pub-sgp-01` (SG-ref chain) | allow-all |
-| `pri-sgp-02` | from `pri-sgp-01` (own) + **peer `pri-sgp-02`** (SG-ref) | ICMP+SSH **to peer `pri-sgp-02`** only |
-| `pri-sgp-03` | from `pri-sgp-01` (own) + **peer `pri-sgp-03`** | ICMP+SSH **to peer `pri-sgp-03`** only |
+| `pri-sgp-02` | from `pri-sgp-01` (own) + **peer `pri-sgp-02`** (SG-ref) | ICMP+SSH **to peer `pri-sgp-02`** + UDP 53 to the VPC resolver |
+| `pri-sgp-03` | from `pri-sgp-01` (own) + **peer `pri-sgp-03`** | ICMP+SSH **to peer `pri-sgp-03`** + UDP 53 to the VPC resolver |
 
 Cross-VPC host references resolve through **remote state sharing** (not the
 `workspace-outputs` path — see Lessons). SGs are attached inline via
 `vpc_security_group_ids` on each instance, so the ENI wears exactly the tier SG.
 
-Note the `-02`/`-03` tiers have **no allow-all egress** — only the two peer portals. Outbound DNS
-(UDP 53) is therefore closed on those boxes too.
+Note the `-02`/`-03` tiers have **no allow-all egress** — only the two peer portals, plus a single
+UDP 53 rule to the VPC resolver (`cidrhost(vpc_cidr, 2)`, a `/32`). Without that rule the boxes
+cannot resolve anything at all, so peer *hostname* lookups fail before reachability is ever tested.
 
 ## Deploy
 
@@ -192,9 +205,9 @@ Result — 0% loss, and the control fails exactly as designed:
 Mirror direction (BE → FE, 03 pair) runs the same way through the backend bastion:
 `ssh -J ec2-user@<be-bastion-public-ip>,ubuntu@192.168.253.198 ubuntu@192.168.255.92 'ping -c 4 10.0.255.136'`
 
-Hostname variants (`ping ip-192-168-254-236.ec2.internal`) need two more things first: the
-`aws_vpc_peering_connection_options` resource in `peering/`, and a UDP 53 egress rule on the
-`-02`/`-03` SGs.
+Hostname variants (`ping ip-192-168-254-236.ec2.internal`) are wired in code — peer DNS resolution
+on the PCX plus the UDP 53 resolver egress — but the screenshot above predates both, so re-run the
+test after applying `peering/`, `frontend-security/` and `backend-security/` to capture it.
 
 ## Learnings
 
