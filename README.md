@@ -19,29 +19,35 @@ remote state reads.
 ### Workspace graph (deployment order, strictly linear)
 
 ```
-hc-frontend-network ──┐
-hc-backend-network ───┤
-                      ▼
-                hc-peering              reads both network stacks
-                      ▼
-hc-frontend-security      hc-backend-security
-        each security stack reads: own network stack + the peer security stack
-                      ▼
-hc-frontend-compute       hc-backend-compute
+hc-frontend-network ──────┬──────── hc-backend-network
+         │                 │                 │
+         ▼                 │                 ▼
+hc-frontend-security       │        hc-backend-security
+         │       \         │         /       │
+         │        \        ▼        /        │
+         │         └─→ hc-peering ←─┘        │
+         │        reads both networks (routes)
+         │        + both securities (portals)
+         ▼                                   ▼
+hc-frontend-compute                 hc-backend-compute
         each compute stack reads: own network stack + own security stack
 ```
 
 | Workspace | Directory | Owns |
 |---|---|---|
 | `hc-frontend-network` / `hc-backend-network` | `frontend-network/`, `backend-network/` | VPC + 3 public + 3 private subnets, IGW, regional NAT, per-AZ private route tables |
-| `hc-peering` | `peering/` | PCX (+ peer DNS resolution) + same-ordinal peer routes |
-| `hc-frontend-security` / `hc-backend-security` | `frontend-security/`, `backend-security/` | SG chain (pub-bastion → pri-01 → pri-02/03) + cross-VPC portals |
+| `hc-peering` | `peering/` | PCX (+ peer DNS resolution) + same-ordinal peer routes + **all cross-VPC SG portals** |
+| `hc-frontend-security` / `hc-backend-security` | `frontend-security/`, `backend-security/` | SG chain (pub-bastion → pri-01 → pri-02/03), own VPC only |
 | `hc-frontend-compute` / `hc-backend-compute` | `frontend-compute/`, `backend-compute/` | Instances (1 public AL2023 bastion + 3 private Ubuntu) |
 
 Design rules that shaped everything below
 
-- one concern per workspace — networks make subnets/routes; peering owns the *connection matrix*;
-  security owns allow-lists; compute consumes ids
+- one concern per workspace — networks make subnets/routes; peering owns the whole *connection
+  matrix* (PCX + routes + cross-VPC SG portals); security owns own-VPC allow-lists; compute
+  consumes ids
+- **no workspace reads its mirror twin.** Cross-VPC SG rules live in `hc-peering` precisely so the
+  two security stacks stay independent — a security-to-security read makes both unappliable from a
+  clean slate, since each would need outputs the other has not published yet
 - **dependency graph is one-directional**: network → peering → security → compute; every cross-stack
   read goes through producer *outputs only* (`data "terraform_remote_state"` / `data "tfe_outputs"`)
 - mirrored stacks are structural twins — same HCL, inverted names/CIDRs
@@ -110,6 +116,11 @@ never `aws_security_group_rule`, never inline rule blocks.
 | `pri-sgp-02` | from `pri-sgp-01` (own) + **peer `pri-sgp-02`** (SG-ref) | ICMP+SSH **to peer `pri-sgp-02`** + UDP 53 to the VPC resolver |
 | `pri-sgp-03` | from `pri-sgp-01` (own) + **peer `pri-sgp-03`** | ICMP+SSH **to peer `pri-sgp-03`** + UDP 53 to the VPC resolver |
 
+The `-02`/`-03` rows' peer half is **not declared here** — those 16 rules live in `peering/`, keyed
+by a `portals` map (`fe-02`, `fe-03`, `be-02`, `be-03`), each with `depends_on` on the PCX. A
+peer-group reference is only meaningful while the connection exists, and keeping them there is what
+lets both security stacks apply from empty with no ordering between them.
+
 Cross-VPC host references resolve through **remote state sharing** (not the
 `workspace-outputs` path — see Lessons). SGs are attached inline via
 `vpc_security_group_ids` on each instance, so the ENI wears exactly the tier SG.
@@ -132,11 +143,12 @@ Run order and plan gates (each step is add-only in a clean run):
 | Step | Gate |
 |---|---|
 | 1. FE/BE network | VPC + subnets + IGW + NAT + tables (+0 destroys) |
-| 2. peering | 5 adds: 1 PCX + 4 peer routes |
-| 3. FE security | 14 adds (4 SGs + their own-VPC rules) |
-| 4. BE security | 14 adds |
-| 5. cross-VPC portals | 8 adds per side (added only after both sides publish outputs) |
-| 6. FE/BE compute | 4 instance creates per side |
+| 2. FE/BE security | 16 adds each: 4 SGs + own-VPC rules + resolver egress |
+| 3. peering | 21 adds: 1 PCX + 4 peer routes + 16 cross-VPC portal rules |
+| 4. FE/BE compute | 4 instance creates per side |
+
+Security now precedes peering (it publishes the SG ids the portals reference), and the two security
+stacks can run in either order or in parallel.
 
 > Read every plan bottom-up; in the first deploy the only legitimate diff is the step's adds.
 > Anything touching another layer's resources = stop and read.

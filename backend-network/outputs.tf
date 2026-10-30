@@ -1,5 +1,5 @@
 output "vpc_id" {
-  description = "hc-backend-vpc id"
+  description = "hc-backend-vpc id modified for testing purpose."
   value       = aws_vpc.main.id
 }
 
