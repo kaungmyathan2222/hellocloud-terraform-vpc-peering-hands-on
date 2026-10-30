@@ -11,21 +11,19 @@ variable "project_name" {
 }
 
 variable "region" {
-  description = "AWS region published to every workspace as AWS_DEFAULT_REGION"
+  description = "AWS region the stacks deploy into"
   type        = string
   default     = "us-east-1"
 }
 
-variable "aws_access_key_id" {
-  description = "Optional: set via TF_VAR_aws_access_key_id to manage the credential here instead of in the UI"
+variable "github_repo" {
+  description = "owner/repo backing every workspace"
   type        = string
-  default     = null
-  sensitive   = true
+  default     = "kaungmyathan2222/hellocloud-terraform-vpc-peering-hands-on"
 }
 
-variable "aws_secret_access_key" {
-  description = "Optional: set via TF_VAR_aws_secret_access_key"
+variable "github_app_installation_id" {
+  description = "HCP's GitHub App installation, taken from the existing VCS connection"
   type        = string
-  default     = null
-  sensitive   = true
+  default     = "ghain-jdpDymSFbf3SGmAr"
 }
