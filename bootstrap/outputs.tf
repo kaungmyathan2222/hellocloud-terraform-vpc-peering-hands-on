@@ -3,7 +3,7 @@ output "workspace_ids" {
   value       = { for k, w in tfe_workspace.stack : k => w.id }
 }
 
-output "variable_set_id" {
-  description = "id of the shared AWS credential variable set"
-  value       = tfe_variable_set.aws.id
+output "run_triggers" {
+  description = "consumer workspace <- producer workspace"
+  value       = sort(keys(local.run_triggers))
 }
