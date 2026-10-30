@@ -67,3 +67,5 @@ output "public_subnet_cidrs" {
     "03" = aws_subnet.public-subnet-03.cidr_block
   }
 }
+
+# VCS-driven workflow smoke test
