@@ -10,6 +10,8 @@ variable "project" {
 }
 
 variable "my_ip" {
-  type    = string
-  default = "27.130.9.112/32"
+  # No default on purpose: a VCS-driven run cannot take -var, so a committed
+  # default would silently become permanent. Value comes from the aws-oidc set.
+  description = "Admin CIDR allowed to SSH"
+  type        = string
 }

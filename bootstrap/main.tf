@@ -4,15 +4,17 @@ data "tfe_project" "lab" {
 }
 
 locals {
-  # workspace name -> directory in this repo
+  # workspace name -> directory in this repo, and whether a merge applies itself.
+  # Network and security auto-apply; peering and compute stop at Confirm & apply
+  # because they touch instances and cross-VPC routing.
   stacks = {
-    "hc-frontend-network"  = "frontend-network"
-    "hc-backend-network"   = "backend-network"
-    "hc-frontend-security" = "frontend-security"
-    "hc-backend-security"  = "backend-security"
-    "hc-peering"           = "peering"
-    "hc-frontend-compute"  = "frontend-compute"
-    "hc-backend-compute"   = "backend-compute"
+    "hc-frontend-network"  = { dir = "frontend-network", auto_apply = true }
+    "hc-backend-network"   = { dir = "backend-network", auto_apply = true }
+    "hc-frontend-security" = { dir = "frontend-security", auto_apply = true }
+    "hc-backend-security"  = { dir = "backend-security", auto_apply = true }
+    "hc-peering"           = { dir = "peering", auto_apply = false }
+    "hc-frontend-compute"  = { dir = "frontend-compute", auto_apply = false }
+    "hc-backend-compute"   = { dir = "backend-compute", auto_apply = false }
   }
 
   # producer -> who may read its outputs via terraform_remote_state.
@@ -27,11 +29,16 @@ locals {
     "hc-backend-compute"   = []
   }
 
-  aws_env_vars = merge(
-    { AWS_DEFAULT_REGION = var.region },
-    var.aws_access_key_id == null ? {} : { AWS_ACCESS_KEY_ID = var.aws_access_key_id },
-    var.aws_secret_access_key == null ? {} : { AWS_SECRET_ACCESS_KEY = var.aws_secret_access_key },
-  )
+  # Sharing lets a consumer READ outputs; it does not make it re-plan.
+  # Flatten the same graph into consumer <- producer pairs for run triggers.
+  run_triggers = merge([
+    for producer, consumers in local.state_consumers : {
+      for c in consumers : "${c}__from__${producer}" => {
+        consumer = c
+        producer = producer
+      }
+    }
+  ]...)
 }
 
 resource "tfe_workspace" "stack" {
@@ -40,15 +47,22 @@ resource "tfe_workspace" "stack" {
   name              = each.key
   organization      = var.organization
   project_id        = data.tfe_project.lab.id
-  working_directory = each.value
+  working_directory = each.value.dir
+  description       = "Lab stack: ${each.value.dir}"
 
-  # No vcs_repo block: GitHub Actions drives applies through the CLI, and a
-  # VCS-connected workspace refuses CLI applies.
-  queue_all_runs     = false
-  auto_apply         = false
+  auto_apply         = each.value.auto_apply
   allow_destroy_plan = true
 
-  description = "Lab stack: ${each.value}"
+  queue_all_runs        = true
+  file_triggers_enabled = true
+
+  speculative_enabled = true
+
+  vcs_repo {
+    identifier                 = var.github_repo
+    branch                     = "main"
+    github_app_installation_id = var.github_app_installation_id
+  }
 }
 
 resource "tfe_workspace_settings" "stack" {
@@ -64,23 +78,16 @@ resource "tfe_workspace_settings" "stack" {
   ]
 }
 
-resource "tfe_variable_set" "aws" {
-  name         = "aws-credentials"
-  description  = "AWS env credentials shared by every lab workspace"
-  organization = var.organization
+resource "tfe_run_trigger" "stack" {
+  for_each = local.run_triggers
+
+  workspace_id  = tfe_workspace.stack[each.value.consumer].id
+  sourceable_id = tfe_workspace.stack[each.value.producer].id
 }
 
-resource "tfe_project_variable_set" "aws" {
-  variable_set_id = tfe_variable_set.aws.id
-  project_id      = data.tfe_project.lab.id
-}
+# The aws-oidc variable set (TFC_AWS_* dynamic credentials, plus my_ip) already
+# exists and is attached to this project. Left unmanaged on purpose: declaring it
+# here would create a second, duplicate set.
 
-resource "tfe_variable" "aws" {
-  for_each = local.aws_env_vars
-
-  key             = each.key
-  value           = each.value
-  category        = "env"
-  sensitive       = each.key != "AWS_DEFAULT_REGION"
-  variable_set_id = tfe_variable_set.aws.id
-}
+# One-shot adoption of the two workspaces built by hand before this stack existed.
+# Delete both blocks once the apply succeeds.
