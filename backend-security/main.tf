@@ -1,3 +1,8 @@
+# Tier 2 - reads backend-network.
+# Publishes security group ids read by backend-compute and peering.
+# my_ip has no default in code: a VCS-driven run cannot take -var, so the
+# value comes from the aws-oidc variable set on the project.
+
 data "terraform_remote_state" "network" {
   backend = "remote"
 
