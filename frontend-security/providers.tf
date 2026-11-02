@@ -11,7 +11,10 @@ terraform {
   cloud {
     organization = "genie"
     workspaces {
-      name = "hc-frontend-security"
+      # Pinned: the org default project is hc-vpc-peering, but the aws-oidc
+      # varset and the IAM trust policy both scope to hc-vpc-peering-vcs-hcp.
+      project = "hc-vpc-peering-vcs-hcp"
+      name    = "hc-frontend-security"
     }
   }
 }
