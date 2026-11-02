@@ -1,3 +1,9 @@
+# Tier 3 - reads both networks and both security stacks.
+# Owns the whole connection matrix: the peering connection, the cross-VPC
+# routes, and the cross-VPC security group rules. Those rules live here on
+# purpose - it is what keeps the two security stacks independent of each
+# other, so either side can be applied from a clean slate.
+
 data "terraform_remote_state" "hc-frontend-network" {
   backend = "remote"
   config = {
