@@ -1,368 +1,238 @@
-# Intra-Region VPC Peering — HCP Terraform Remote Execution Hands-On
+# Intra-Region VPC Peering — VCS-Driven HCP Terraform
 
-![architecture](images/01-architecture.png)
+Two mirrored AWS VPCs, peered and firewalled entirely by Terraform. A merge to `main` plans and
+applies the affected stack in HCP Terraform; AWS auth is OIDC dynamic credentials, no static keys.
 
-Two mirrored AWS VPCs (`hc-frontend-vpc` `10.0.0.0/16`, `hc-backend-vpc` `192.168.0.0/16`, both `us-east-1`)
-built, peered, and firewalled entirely by Terraform — **VCS-driven**: a merge to `main` plans and
-applies the affected stacks in HCP Terraform (org `genie`), authenticating to AWS with OIDC dynamic
-credentials. The seven workspaces are created once in the HCP UI; cross-stack wiring is done via
-remote state reads.
+`us-east-1` · Terraform `>= 1.12` · `hashicorp/aws ~> 6.0` · org `genie` · project
+`hc-vpc-peering-vcs-hcp` · **7 workspaces · 116 resources** · account `780344647951`
 
-> Region `us-east-1` · Terraform `>= 1.12` · `hashicorp/aws ~> 6.0` (regional NAT) · 7 HCP workspaces
-> · 116 AWS resources · AWS account `780344647951`
-
-> Diagram caveats: the right-hand VPC is `hc-backend-vpc` (label typo), and the region badge is
-> illustrative — everything is built in `us-east-1`.
+![stack](images/13-vcs-driven-stack.png)
 
 ---
 
-## Architecture
-
-### Workspace graph (deployment order, strictly linear)
+## Stacks
 
 ```
-hc-frontend-network ──────┬──────── hc-backend-network
-         │                 │                 │
-         ▼                 │                 ▼
-hc-frontend-security       │        hc-backend-security
-         │       \         │         /       │
-         │        \        ▼        /        │
-         │         └─→ hc-peering ←─┘        │
-         │        reads both networks (routes)
-         │        + both securities (portals)
-         ▼                                   ▼
-hc-frontend-compute                 hc-backend-compute
-        each compute stack reads: own network stack + own security stack
+fe-network ──┬─> fe-security ──┬─> fe-compute
+             └─────────────────┴─> peering <─┬─ be-security <── be-network
+                                             └─ be-compute
+```
+`network → security → {peering, compute}`. Every cross-stack read is `data "terraform_remote_state"`
+(backend `remote`) against producer **outputs only**.
+
+| Workspace | ID | Directory | Resources | Owns |
+|---|---|---|---|---|
+| `hc-frontend-network` | `ws-GPGYRhfZYgWVxRw3` | `frontend-network/` | 19 | VPC, 3+3 subnets, IGW, NAT, route tables |
+| `hc-backend-network` | `ws-ZKzAjhVKZRuRzcdb` | `backend-network/` | 19 | mirror |
+| `hc-frontend-security` | `ws-2VNi1aAgBARt5SNB` | `frontend-security/` | 17 | SG chain, own VPC only |
+| `hc-backend-security` | `ws-nH3SfVrNhVL6AdFj` | `backend-security/` | 17 | mirror |
+| `hc-peering` | `ws-R9rpo6kxcLDRqjXR` | `peering/` | 26 | PCX + peer routes + **all cross-VPC SG portals** |
+| `hc-frontend-compute` | `ws-dNKgqQpzrXDgniFk` | `frontend-compute/` | 9 | 1 bastion + 3 private instances |
+| `hc-backend-compute` | `ws-KUWQdCW8Tg88CXVw` | `backend-compute/` | 9 | mirror |
+
+
+Two rules shape this split:
+
+- **No workspace reads its mirror twin.** Cross-VPC SG rules live in `peering/`, so both security
+  stacks can apply from empty with no ordering between them.
+- **Peering owns the whole connection matrix** — PCX, routes, and portals — because a peer-group
+  SG reference is only meaningful while the connection exists.
+
+## Pipeline — VCS-driven
+
+No `terraform apply` is run by hand against any stack; VCS-connected workspaces refuse CLI applies.
+
+```
+branch → commit in one stack folder → PR → speculative plan on that workspace
+  → merge to main → real run → apply
 ```
 
-| Workspace | ID | Directory | Auto-apply | Resources | Owns |
-|---|---|---|---|---|---|
-| `hc-frontend-network` | `ws-PFodMsoD8GG6gJc5` | `frontend-network/` | yes | 19 | VPC + 3 public + 3 private subnets, IGW, regional NAT, per-AZ private route tables |
-| `hc-backend-network` | `ws-au4bxAZoN1eF1SMb` | `backend-network/` | yes | 19 | mirror of the above |
-| `hc-frontend-security` | `ws-rmfNvLuvNRNM82RU` | `frontend-security/` | yes | 17 | SG chain (pub-bastion → pri-01 → pri-02/03), own VPC only |
-| `hc-backend-security` | `ws-gg1gRMtvUuQfaHns` | `backend-security/` | yes | 17 | mirror of the above |
-| `hc-peering` | `ws-cYiSzFL5Urptba65` | `peering/` | **no** | 26 | PCX (+ peer DNS resolution) + same-ordinal peer routes + **all cross-VPC SG portals** |
-| `hc-frontend-compute` | `ws-R8WLuDWJPHL26Gbz` | `frontend-compute/` | **no** | 9 | Instances (1 public AL2023 bastion + 3 private Ubuntu) |
-| `hc-backend-compute` | `ws-PK7htXEUeHnEDmzp` | `backend-compute/` | **no** | 9 | mirror of the above |
-
-Auto-apply is on for network and security (additive, low blast radius) and off for peering and
-compute, which stop at **Confirm & apply**.
-
-Design rules that shaped everything below
-
-- one concern per workspace — networks make subnets/routes; peering owns the whole *connection
-  matrix* (PCX + routes + cross-VPC SG portals); security owns own-VPC allow-lists; compute
-  consumes ids
-- **no workspace reads its mirror twin.** Cross-VPC SG rules live in `hc-peering` precisely so the
-  two security stacks stay independent — a security-to-security read makes both unappliable from a
-  clean slate, since each would need outputs the other has not published yet
-- **dependency graph is one-directional**: network → security → {peering, compute}; every cross-stack
-  read goes through producer *outputs only*, via `data "terraform_remote_state"` (backend `remote`).
-  `data "tfe_outputs"` was tried and silently returned empty values — see Learnings
-- mirrored stacks are structural twins — same HCL, inverted names/CIDRs
-
-### Network layout (per VPC)
-
-Three VPCs exist in the account; the third (`172.31.0.0/16`) is the untouched AWS default.
-
-![vpcs](images/02-vpcs.png)
-
-Six subnets per VPC, same-ordinal CIDRs mirrored across sides (`10.0.25x.0/24` ↔ `192.168.25x.0/24`):
-
-![subnets](images/03-subnets.png)
-
-- public subnets `-01/-02/-03` → IGW route (public-rtb)
-- private `-01` → regional NAT route
-- private `-02/-03` → **peer-only tables** (no default route): the only way out is through the peering
-
-![route-tables](images/04-route-tables.png)
-
-![internet-gateways](images/05-internet-gateways.png)
-
-### Peering
-
-One PCX, `auto_accept = true` (same account, same region), carrying exactly four routes —
-same-ordinal `/24` to `/24`, never a blanket `/16`:
-
-![peering-connection](images/06-peering-connection-active.png)
-
-| Route table | Destination | Target |
-|---|---|---|
-| `hc-frontend-private-rtb-02` | `192.168.254.0/24` | `pcx-0bd187ed1f4b2e82b` |
-| `hc-frontend-private-rtb-03` | `192.168.255.0/24` | `pcx-0bd187ed1f4b2e82b` |
-| `hc-backend-vpc-private-rtb-02` | `10.0.254.0/24` | `pcx-0bd187ed1f4b2e82b` |
-| `hc-backend-vpc-private-rtb-03` | `10.0.255.0/24` | `pcx-0bd187ed1f4b2e82b` |
-
-Public tables and the `-01` (NAT) tables carry **no** peer route — deliberate, and the negative
-control in the evidence run proves it.
-
-DNS resolution across the peer is declared on the connection itself — nested `accepter {}` /
-`requester {}` blocks with `allow_remote_vpc_dns_resolution = true`, so no separate
-`aws_vpc_peering_connection_options` resource is needed:
-
-```hcl
-resource "aws_vpc_peering_connection" "frontend_to_backend" {
-  # ...
-  accepter  { allow_remote_vpc_dns_resolution = true }
-  requester { allow_remote_vpc_dns_resolution = true }
-}
-```
-
-Valid here only because both VPCs are in the same account and region; cross-account peering needs
-the separate options resource, applied by each side's owner. The evidence capture below predates
-this flag, so it is IP-level only.
-
-## Security model
-
-Standalone rules only (best-practice warning honored on the way in):
-`aws_vpc_security_group_ingress_rule` / `aws_vpc_security_group_egress_rule`;
-never `aws_security_group_rule`, never inline rule blocks.
-
-| SG | Inbound | Outbound |
-|---|---|---|
-| `pub-sgp-01` | SSH + ICMP from **operator IP /32** | allow-all |
-| `pri-sgp-01` | SSH + ICMP from `pub-sgp-01` (SG-ref chain) | allow-all |
-| `pri-sgp-02` | from `pri-sgp-01` (own) + **peer `pri-sgp-02`** (SG-ref) | ICMP+SSH **to peer `pri-sgp-02`** + UDP 53 to the VPC resolver |
-| `pri-sgp-03` | from `pri-sgp-01` (own) + **peer `pri-sgp-03`** | ICMP+SSH **to peer `pri-sgp-03`** + UDP 53 to the VPC resolver |
-
-The `-02`/`-03` rows' peer half is **not declared here** — those 16 rules live in `peering/`, keyed
-by a `portals` map (`fe-02`, `fe-03`, `be-02`, `be-03`), each with `depends_on` on the PCX. A
-peer-group reference is only meaningful while the connection exists, and keeping them there is what
-lets both security stacks apply from empty with no ordering between them.
-
-Cross-VPC host references resolve through **remote state sharing** (not the
-`workspace-outputs` path — see Lessons). SGs are attached inline via
-`vpc_security_group_ids` on each instance, so the ENI wears exactly the tier SG.
-
-Note the `-02`/`-03` tiers have **no allow-all egress** — only the two peer portals, plus a single
-UDP 53 rule to the VPC resolver (`cidrhost(vpc_cidr, 2)`, a `/32`). Without that rule the boxes
-cannot resolve anything at all, so peer *hostname* lookups fail before reachability is ever tested.
-
-## Deploy — VCS-driven
-
-No `terraform apply` is run by hand against any stack. A merge to `main` plans and applies the
-affected workspaces.
-
-### Control plane
-
-| | Value |
-|---|---|
-| HCP organization | `genie` |
-| Project | `hc-vpc-peering-vcs-hcp` (`prj-sqXfYP2rYs1RQmAn`) |
-| VCS | GitHub App `ghain-jdpDymSFbf3SGmAr` → `kaungmyathan2222/hellocloud-terraform-vpc-peering-hands-on`, branch `main` |
-
-Each workspace is created once in the HCP UI — **New → Workspace → Version control workflow** — with
-four settings that matter:
+Workspaces are created by hand in the HCP UI (no `bootstrap/`, no `tfe` provider). Each sets:
 
 | Setting | Value |
 |---|---|
 | Working directory | the stack's folder, e.g. `frontend-network` |
-| Auto-apply | on for network and security, off for peering and compute |
-| Remote state sharing | the consumers in the dependency graph above, not global |
-| Auto queue runs | on — otherwise the first push after creation queues nothing (see Learnings) |
+| Branch | `main`, all seven |
+| Trigger patterns | `/<dir>/*` and `/<dir>/**/*` |
+| Auto-apply | on, all seven |
 
-An earlier revision generated all seven with the `tfe` provider from an admin workspace, `hc-admin`.
-It worked, but it bought nothing at seven workspaces that are created once and never change, and the
-run triggers it wired up caused every cascade failure in Learnings. Removed.
+**No run triggers.** A workspace runs only when its own files change. Ordering is a human step —
+merge in tier order `1 networks → 2 security → 3 peering, compute`; destroy walks it backwards.
 
-### AWS authentication — OIDC dynamic credentials
+Merging PR #11 — the webhook fires, `hc-backend-compute` plans, and the status check reports
+no changes because the commit only touched a comment:
 
-No static keys anywhere. Every workspace has **zero** workspace variables; credentials come from a
-project-scoped variable set, `aws-oidc` (`varset-rE8vKGGtxEgEEZsx`):
+![vcs-trigger](images/14-vcs-trigger-pr11.png)
+
+All seven after a full build driven entirely through this pipeline — **0 errored**:
+
+![workspaces](images/15-hcp-workspaces.png)
+
+## AWS auth — OIDC
+
+Zero workspace-level variables. Credentials come from a project-scoped variable set, so any
+workspace created in `hc-vpc-peering-vcs-hcp` inherits them.
+
+![varset](images/16-varset-aws-oidc.png)
 
 | Key | Category | Value |
 |---|---|---|
 | `TFC_AWS_PROVIDER_AUTH` | env | `true` |
 | `TFC_AWS_WORKLOAD_IDENTITY_AUDIENCE` | env | `aws.workload.identity` |
-| `TFC_AWS_PLAN_ROLE_ARN` | env | `arn:aws:iam::780344647951:role/tf-aws-plan-role` |
-| `TFC_AWS_APPLY_ROLE_ARN` | env | `arn:aws:iam::780344647951:role/tf-aws-apply-role` |
+| `TFC_AWS_PLAN_ROLE_ARN` | env | `…:role/tf-aws-plan-role` |
+| `TFC_AWS_APPLY_ROLE_ARN` | env | `…:role/tf-aws-apply-role` |
 | `my_ip` | terraform | operator CIDR for the bastion SG |
 
-IAM provider `app.terraform.io`, two roles split by run phase:
-
-| Role | Policy | Trust condition (`StringLike` on `app.terraform.io:sub`) |
+| Role | Policy | Trust (`StringLike` on `app.terraform.io:sub`) |
 |---|---|---|
 | `tf-aws-plan-role` | `ReadOnlyAccess` | `organization:genie:project:hc-vpc-peering-vcs-hcp:workspace:*:run_phase:plan` |
 | `tf-aws-apply-role` | `PowerUserAccess` | `…:workspace:*:run_phase:apply` |
 
-`StringLike` (not `StringEquals`) is what makes `workspace:*` match — one role pair covers all seven.
-`aud` is pinned with `StringEquals`.
+`StringLike` is what makes `workspace:*` match — one role pair covers all seven. `aud` is pinned
+with `StringEquals`. **The project name in `sub` is load-bearing**: a workspace in any other project
+gets no variables and matches no trust policy.
 
-`my_ip` has **no default in code**: a VCS-driven run cannot take `-var`, so a committed default would
-silently become permanent. It lives in the variable set instead.
+`my_ip` has no default in code — a VCS-driven run cannot take `-var`, so a committed default would
+become permanent.
 
-### Run triggering
+## Network
 
-Each workspace sets `file_triggers_enabled` with a `working_directory` and **no** trigger patterns —
-HCP then triggers on changes under that directory. Patterns were tried first and are easy to get
-wrong (they are appended to the repo root and want a leading slash); the working-directory default
-cannot be typo'd.
+![vpcs](images/18-vpcs.png)
 
-**Auto queue runs** must be on. Without it a freshly created workspace ingresses pushes and queues
-no run until one is started by hand — see Learnings.
+| VPC | ID | CIDR |
+|---|---|---|
+| `hc-frontend-vpc` | `vpc-04815d060d62860fe` | `10.0.0.0/16` |
+| `hc-backend-vpc` | `vpc-0b35c7e2169be4bb0` | `192.168.0.0/16` |
 
-### No run triggers
+Six subnets per VPC, same-ordinal CIDRs mirrored across sides (`10.0.25x.0/24` ↔ `192.168.25x.0/24`):
 
-A workspace runs when **its own files** change in a merge — nothing else. There are no
-`tfe_run_trigger` objects, so a stack applying never queues its consumers.
+- public `-01/-02/-03` → IGW route
+- private `-01` → NAT route
+- private `-02/-03` → **peer-only tables, no default route**
 
-Ordering is a human step: merge in dependency order.
+![subnets](images/03-subnets.png)
+![route-tables](images/04-route-tables.png)
 
-```
-1. fe-network, be-network      no dependencies
-2. fe-security, be-security    read the network outputs
-3. peering                     reads both networks
-4. fe-compute, be-compute      read network + security
-```
+## Peering
 
-Destroy walks the same list backwards, 4 → 1.
+![peering](images/19-peering-active.png)
 
-Run triggers were tried here and removed. They fire one hop on apply with no notion of waiting for
-the rest of the graph, so a cold start queued compute before security had state and the run errored
-on `Unable to find remote state` — see Learnings.
+One PCX `pcx-0061536805d5a7ee2`, `auto_accept = true`, carrying exactly four routes — same-ordinal
+`/24` to `/24`, never a blanket `/16`:
 
-### Day-to-day flow
+| Route table | Destination |
+|---|---|
+| `hc-frontend-private-rtb-02` | `192.168.254.0/24` |
+| `hc-frontend-private-rtb-03` | `192.168.255.0/24` |
+| `hc-backend-private-rtb-02` | `10.0.254.0/24` |
+| `hc-backend-private-rtb-03` | `10.0.255.0/24` |
 
-```
-branch → commit under one stack folder → PR to main
-  → HCP posts a speculative plan on that workspace only
-  → merge → real run → network/security auto-apply; peering/compute stop at Confirm & apply
-```
+Public and `-01` tables carry **no** peer route — the negative control below proves it.
 
-![hcp-workspaces](images/07-hcp-workspaces.png)
+DNS across the peer is declared on the connection itself, valid only because both VPCs are in the
+same account and region:
 
-![hcp-run](images/08-hcp-run-applied.png)
-
-Eight instances running, one bastion + three private per side, each wearing its tier SG:
-
-![instances](images/09-instances-running.png)
-
-### Evidence run (cross-VPC proof)
-
-The SSH path is **three hops, not two**: `pri-sgp-02` trusts `pri-sgp-01`, *not* `pub-sgp-01`, so the
-bastion cannot reach private-02 directly.
-
-```
-bastion (pub-sgp-01) → private-01 (pri-sgp-01) → private-02 (pri-sgp-02) → ping peer private-02
+```hcl
+accepter  { allow_remote_vpc_dns_resolution = true }
+requester { allow_remote_vpc_dns_resolution = true }
 ```
 
-`ssh -i` is **not** inherited by `-J` jump hosts, so load the key into the agent first:
+## Security
+
+Standalone rules only — `aws_vpc_security_group_{ingress,egress}_rule`, never inline blocks.
+
+| SG | Inbound | Outbound |
+|---|---|---|
+| `pub-sgp-01` | SSH + ICMP from operator `/32` | allow-all |
+| `pri-sgp-01` | SSH + ICMP from `pub-sgp-01` | allow-all |
+| `pri-sgp-02` | `pri-sgp-01` + **peer `pri-sgp-02`** | peer `pri-sgp-02` + UDP 53 to VPC resolver |
+| `pri-sgp-03` | `pri-sgp-01` + **peer `pri-sgp-03`** | peer `pri-sgp-03` + UDP 53 to VPC resolver |
+
+The peer halves of `-02`/`-03` live in `peering/`, keyed by a `portals` map with `depends_on` on
+the PCX. The `-02`/`-03` tiers have **no allow-all egress** — without the UDP 53 rule they cannot
+resolve anything, so peer hostname lookups fail before reachability is tested.
+
+## Evidence
+
+![instances](images/17-instances.png)
+
+| Role | Instance | ID | IP |
+|---|---|---|---|
+| FE bastion | `hc-frontend-compute-public-instance` | `i-0c3e0fb38f2142c57` | `13.222.140.121` |
+| FE private-01 | `…-private-instance-01` | `i-0f95f8311d698533a` | `10.0.253.156` |
+| FE private-02 | `…-private-instance-02` | `i-0a0e15f70fbed71be` | `10.0.254.198` |
+| BE private-02 | `…-private-instance-02` | `i-0fd39114bbdd06675` | `192.168.254.60` |
+| BE bastion | `hc-backend-compute-public-instance` | `i-020341fc008c94be3` | `3.231.19.182` |
+
+SSH is **three hops, not two** — `pri-sgp-02` trusts `pri-sgp-01`, not `pub-sgp-01`:
 
 ```bash
-ssh-add my-aws-hellocloud-keypair.pem
-ssh -J ec2-user@<fe-bastion-public-ip>,ubuntu@10.0.253.72 ubuntu@10.0.254.127 \
-  'ip route get 192.168.254.102; \
-   ping -c 4 192.168.254.102; \
-   ping -c 2 -W 2 192.168.253.85 || echo "EXPECTED FAIL: unrouted peer subnet"'
+ssh-add my-aws-hellocloud-keypair.pem     # -i is NOT inherited by -J jump hosts
+ssh -J ec2-user@13.222.140.121,ubuntu@10.0.253.156 ubuntu@10.0.254.198 \
+  'ip route get 192.168.254.60; \
+   ping -c 4 192.168.254.60; \
+   ping -c 2 -W 2 192.168.253.220 || echo "EXPECTED FAIL: unrouted peer subnet"'
 ```
-
-Without an agent, nest the hops explicitly and use literal `host:port` — `%h`/`%p` are expanded once,
-by the outer `ssh`, so they would aim every hop at the final host:
-
-```bash
-K=my-aws-hellocloud-keypair.pem
-ssh -i $K \
-  -o ProxyCommand="ssh -i $K -W 10.0.254.127:22 -o ProxyCommand='ssh -i $K -W 10.0.253.72:22 ec2-user@<fe-bastion-public-ip>' ubuntu@10.0.253.72" \
-  ubuntu@10.0.254.127
-```
-
-Endpoints under test — same ordinal, opposite sides:
-
-| Role | Instance | ID | Private IP | SG |
-|---|---|---|---|---|
-| source | `hc-frontend-compute-private-instance-02` | `i-0391cfa0d63afad17` | `10.0.254.127` | `pri-sgp-02` (FE) |
-| target | `hc-backend-compute-private-instance-02` | `i-0883be396fbf0e05a` | `192.168.254.102` | `pri-sgp-02` (BE) |
-
-Bastions: FE `98.82.29.189` (`i-0c315ea20045fcd19`), BE `3.238.105.119` (`i-02da5f9ecdaebbbfe`).
-VPCs `vpc-02cb30f08c9685f57` (FE) / `vpc-0f0c67bfd11a35bbf` (BE), PCX `pcx-0bd187ed1f4b2e82b`.
-
-> IPs and ids above are from the current build. The screenshots below predate a full
-> destroy/rebuild through the VCS pipeline, so their addresses differ; the topology is identical.
-
-![frontend-private-02](images/10-frontend-private-02-details.png)
-
-![backend-private-02](images/11-backend-private-02-details.png)
-
-Result — 0% loss, and the control fails exactly as designed:
 
 ![ping-evidence](images/12-ping-evidence-fe-to-be.png)
 
-| Signal | Observed | What it proves |
+| Signal | Observed | Proves |
 |---|---|---|
-| `ip route get` | `via 10.0.254.1 dev ens5` | the peer route is installed *and selected* in `private-rtb-02` |
-| `4 received, 0% packet loss` | rtt 0.31–1.46 ms | all four gates true at once: PCX active, route out, route back, both SG portals open |
-| `ttl=64` | no decrement | peering is a fabric link, not a routed hop — distinguishes a real PCX path from NAT/transit |
-| `192.168.253.85` → 100% loss, silent timeout | no route in `private-rtb-02` | routes are per-`/24`, not a blanket `/16`; packet died at the VPC router, never reached an SG |
+| `ip route get` | `via …dev ens5` | peer route installed *and selected* |
+| `0% packet loss` | rtt 0.31–1.46 ms | PCX active, route out, route back, both SG portals open |
+| `ttl=64` | no decrement | peering is a fabric link, not a routed hop |
+| peer `-01` subnet → 100% loss | no route in `private-rtb-02` | routes are per-`/24`; packet died at the VPC router |
 
-Mirror direction (BE → FE, 03 pair) runs the same way through the backend bastion:
-`ssh -J ec2-user@<be-bastion-public-ip>,ubuntu@192.168.253.85 ubuntu@192.168.255.85 'ping -c 4 10.0.255.18'`
-
-Hostname variants (`ping ip-192-168-254-236.ec2.internal`) are wired in code — peer DNS resolution
-on the PCX plus the UDP 53 resolver egress — but the screenshot above predates both, so re-run the
-test after applying `peering/`, `frontend-security/` and `backend-security/` to capture it.
+> Screenshot 12 predates the current rebuild — addresses differ, topology is identical.
 
 ## Learnings
 
-- **Workspace output transports are not interchangeable.** `data "tfe_outputs"` silently returned
-  empty values on cross-sec-workspace reads, while `data "terraform_remote_state"` (backend `remote`)
-  resolved the same outputs instantly. Remote state sharing is the reliable path.
-- Cross-account SG rules: AWS `referenced_security_group_id` over peering is valid within the same
-  account/region; but build order matters — publish outputs (v1 apply) before adding cross-references.
-- **ICMP rules in SGs are type/code, not ports**: `from_port = 8` (echo request), `to_port = -1`
-  (all codes). SGs are stateful, so the echo *reply* needs no rule of its own.
-- **SG references, not CIDRs**, for the cross-VPC portals: the route tables already constrain traffic
-  to the same-ordinal subnet, so the SG only needs to name the peer group.
-- **An active PCX proves almost nothing.** It is a tunnel with no lanes and locked doors: routes
-  (both directions) and SGs (both directions) are independent control planes that must each be true.
-- `moved {}` blocks: renaming a resource address *can* recreate the same PEER ID vs destroy+create
-  (strike against pure renames on stateful resources); PCX delete is async — an immediate re-create
-  collides with AWS' idempotency ("matching peering exists with different tags").
-- Both compute workspaces' states hold `backend_*` resource addresses; renaming them to match the
-  side would have been 4 destroys + 4 creates for cosmetics. Tags (`hc-frontend-*`) carry the
-  distinction instead.
+**HCP**
+
+- **`queue_all_runs` defaults to `false`; a new workspace swallows its first push.** It ingests the
+  config version and queues nothing until one run is started by hand. `configuration-versions` fills
+  with `status: uploaded` while `runs` stays `count: 0` — indistinguishable from a broken webhook.
+  One manual run clears it permanently.
+- **Trigger patterns are globs matched against changed file paths, and need wildcards.**
+  `frontend-network/` has none, so it matches that literal path and never `frontend-network/main.tf`
+  — PR #5 merged, the webhook fired, a non-speculative config version was created at the right
+  commit, and no run queued. `/frontend-network/*` works. Empty patterns work too: HCP then
+  triggers on the working directory.
+- **Working directory is the code directory**, not a scratch path — it is where `init/plan/apply`
+  run. Point it at a folder that does not exist and the run dies before reaching AWS.
+- **The `cloud {}` block auto-creates workspaces on `init` — in the org default project.** They
+  arrive CLI-driven, with no VCS connection, in the wrong project for the OIDC trust policy. Pin
+  `project` in every `cloud {}` block.
+- **Run triggers are not a dependency scheduler.** One hop on apply, no waiting for the graph.
+  Transitive edges make consumers run too early and error on `terraform_remote_state`; join nodes
+  race regardless. Ten of them produced errored runs on four separate occasions. Removed — merging
+  in tier order does the same job with no moving parts.
+- **Deleting a workspace deletes its state, not its infrastructure.** Two deletions left 38 live
+  AWS resources untracked with NAT gateways still billing. No undo.
+- **`data "tfe_outputs"` silently returned empty values**; `terraform_remote_state` resolved the
+  same outputs instantly. Sharing grants a read — only a trigger causes a re-plan.
+- Free tier is one concurrent run. Fan-out serialises; it looks stuck and is not.
+
+**AWS**
+
+- **An active PCX proves almost nothing** — a tunnel with no lanes and locked doors. Routes (both
+  directions) and SGs (both directions) are independent control planes that must each be true.
+- **ICMP rules are type/code, not ports**: `from_port = 8`, `to_port = -1`. SGs are stateful, so the
+  echo reply needs no rule.
+- **SG references, not CIDRs**, for cross-VPC portals — route tables already constrain traffic to
+  the same-ordinal subnet.
+- PCX delete is async; an immediate re-create collides with AWS' idempotency check. Deleted PCX
+  objects linger ~2 weeks.
 - **`ssh -i` does not reach `-J` jump hosts**, and `%h`/`%p` in a nested `ProxyCommand` expand once
-  at the outer hop — two quiet traps when a bastion chain is more than one hop deep.
-
-### From the VCS migration
-
-- **`queue_all_runs` defaults to `false`, and a new workspace swallows its first push.** HCP
-  ingresses the config version and queues no run until one has been started by hand. Symptom is
-  confusing: `configuration-versions` fills up with `status: uploaded` while `runs` stays at
-  `count: 0`. One manual run satisfies the gate permanently, or set **Auto queue runs** at creation
-  — at the cost of every workspace queueing at once the moment it is created.
-- **Trigger patterns are appended to the repo root and want a leading slash.** `backend-network/**/*`
-  matched nothing; `/backend-network/*` does. The working-directory default avoids the question
-  entirely and is what this repo uses.
-- **Two different authentications, easy to conflate.** The CLI authenticates to HCP with
-  `~/.terraform.d/credentials.tfrc.json` to reach the `cloud` block. The `tfe` provider authenticates
-  separately, *from wherever Terraform executes* — local execution reuses that same file, remote
-  execution needs `TFE_TOKEN` as a workspace variable. Setting `TFE_TOKEN` locally does nothing for a
-  remote run. Revoking the login token breaks `init` itself, before any provider is reached.
-- **Run triggers are not a dependency scheduler, and this lab does not need them.** They fire one
-  hop on apply with no notion of waiting for the rest of the graph. Transitive edges (compute ←
-  network, when network → security → compute already exists) make the consumer run too early and
-  error on `terraform_remote_state`; trimming to *direct* edges orders the cascade but join nodes
-  like `hc-peering` still race. Ten triggers produced errored runs on four separate occasions here.
-  They are gone — merging in dependency order does the same job with no moving parts. State sharing
-  and run triggers are separate concerns: sharing grants a read, only a trigger causes a re-plan.
-- **Deleting an HCP workspace deletes its state, not its infrastructure.** Two deleted workspaces
-  left 38 live AWS resources untracked, NAT gateways still billing. Recovery is destroy-by-hand or
-  import; there is no undo.
-- **Free tier is one concurrent run.** Fan-out from a multi-stack merge, plus run-trigger cascades,
-  serialises. It looks stuck and is not.
+  at the outer hop.
 
 ## Teardown
 
-VCS-connected workspaces refuse CLI applies, so `terraform destroy` from a laptop no longer works.
-Destroy from HCP: **workspace → Settings → Destruction and deletion → Queue destroy plan**, in
-reverse dependency order, each strictly after its consumers are gone:
+VCS-connected workspaces refuse CLI applies. Destroy from HCP — **Settings → Destruction and
+deletion → Queue destroy plan** — in reverse tier order, each strictly after its consumers:
 
 ```
 fe/be compute → peering → fe/be security → fe/be network
 ```
 
-Deleting the workspaces themselves is a UI action and comes **last, only after every stack reports
-zero resources** — destroying a workspace that still holds state orphans every resource it tracked.
-
-Deleted PCX objects linger in the account for ~2 weeks ("deleted" state) and can briefly collide
-with a re-create of the pair. States (and their outputs, evidence) live in `app.terraform.io`.
+Delete the workspaces themselves **last, only after every stack reports zero resources**.
