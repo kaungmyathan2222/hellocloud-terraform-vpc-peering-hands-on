@@ -43,3 +43,28 @@ opa eval --v0-compatible -d policies/01-deny-public-ingress.rego -i plan.json \
 An empty array `[]` means the policy passes. Generate `plan.json` from a real run with
 `terraform show -json <planfile>`, and wrap it as `{"plan": <that json>}` — HCP nests the plan
 under `input.plan`, alongside `input.run`.
+
+## Test fixtures
+
+```bash
+opa check --v0-compatible policies/
+for f in policies/testdata/*.json; do
+  opa eval --v0-compatible -d policies/02-ssh-must-be-host-scoped.rego -i "$f" \
+    data.terraform.policies.ssh_host_scoped.deny --format raw
+done
+```
+
+| Fixture | Source | Expected |
+|---|---|---|
+| `real-plan.json` | an actual `hc-frontend-security` run, wrapped as `{"plan":…,"run":…}` | all five `[]` |
+| `violations.json` | hand-written, one violation per policy | all five flag |
+| `destroy.json` | a `delete` of an open SG rule | all five `[]` |
+
+**Two traps this suite exists to catch**, both found by running against the real plan rather than
+the hand-written one:
+
+- An SSH rule using `referenced_security_group_id` has `cidr_ipv4: null`. Checking the CIDR without
+  exempting SG references flags all three `pri-sgp-*` rules as "opens SSH to null".
+- A *missing* key is **undefined** in Rego, not `null`, and undefined fails the whole rule body
+  silently. Real plans always emit every attribute, hand-written fixtures often do not — hence
+  `object.get(a, "key", null)` rather than `a.key == null`.

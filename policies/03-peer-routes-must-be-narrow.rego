@@ -1,6 +1,3 @@
-# ADVISORY. Routes pointing at a peering connection must name a single /24,
-# never a blanket /16. The whole point of the same-ordinal design is that
-# private-02 can reach only the peer's private-02.
 package terraform.policies.peer_routes_narrow
 
 import input.plan as plan

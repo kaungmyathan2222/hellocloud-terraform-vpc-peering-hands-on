@@ -1,0 +1,3 @@
+{"plan":{"resource_changes":[
+ {"address":"aws_vpc_security_group_ingress_rule.open_ssh","type":"aws_vpc_security_group_ingress_rule","change":{"actions":["delete"],"before":{"cidr_ipv4":"0.0.0.0/0"},"after":null}}
+]}}

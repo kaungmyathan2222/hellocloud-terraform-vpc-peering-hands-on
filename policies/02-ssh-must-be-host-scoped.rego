@@ -1,6 +1,3 @@
-# ADVISORY. SSH may only be opened to a single host (/32) or to another
-# security group. A /24 on port 22 passes the 0.0.0.0/0 gate but is still
-# an entire subnet of machines that can reach the bastion.
 package terraform.policies.ssh_host_scoped
 
 import input.plan as plan
@@ -25,7 +22,15 @@ deny[msg] {
 	r.type == "aws_vpc_security_group_ingress_rule"
 	a := r.change.after
 	covers_ssh(a)
-	cidr := a.cidr_ipv4
+
+	# Only CIDR-based rules are in scope. A rule that names another security
+	# group has cidr_ipv4 == null and is already host-scoped by construction.
+	# object.get, not `== null`: a missing key is *undefined* in Rego, which
+	# would fail the whole body silently rather than passing this guard.
+	object.get(a, "referenced_security_group_id", null) == null
+
+	cidr := object.get(a, "cidr_ipv4", null)
+	cidr != null
 	not endswith(cidr, "/32")
 	msg := sprintf("%v opens SSH to %v -- use a /32 or a security group reference", [r.address, cidr])
 }

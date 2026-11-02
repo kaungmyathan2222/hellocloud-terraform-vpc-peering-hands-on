@@ -1,5 +1,3 @@
-# ADVISORY. Every taggable resource carries a Name tag, so the console is
-# readable and orphans are identifiable after a workspace is deleted.
 package terraform.policies.require_name_tag
 
 import input.plan as plan

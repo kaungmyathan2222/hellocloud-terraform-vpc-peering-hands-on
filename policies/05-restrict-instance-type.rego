@@ -1,4 +1,3 @@
-# ADVISORY. Lab cost guard -- free-tier-sized instances only.
 package terraform.policies.restrict_instance_type
 
 import input.plan as plan
