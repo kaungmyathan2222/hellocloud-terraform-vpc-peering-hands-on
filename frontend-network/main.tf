@@ -1,3 +1,7 @@
+# Tier 1 - no dependencies.
+# Publishes vpc_id, subnet ids and route table ids read by
+# frontend-security, frontend-compute and peering.
+
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
   enable_dns_hostnames = true
