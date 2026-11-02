@@ -1,3 +1,6 @@
+# Tier 3 - reads frontend-network and frontend-security.
+# Terminal stack: nothing reads its outputs.
+
 resource "aws_instance" "backend_public_instance01" {
   ami                         = data.aws_ami.al2023.id
   instance_type               = var.instance_type
