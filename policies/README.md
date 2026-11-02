@@ -59,6 +59,17 @@ done
 | `real-plan.json` | an actual `hc-frontend-security` run, wrapped as `{"plan":…,"run":…}` | all five `[]` |
 | `violations.json` | hand-written, one violation per policy | all five flag |
 | `destroy.json` | a `delete` of an open SG rule | all five `[]` |
+| `edge-cases.json` | IPv6, prefix lists, `-1` protocol, wide port ranges, computed CIDR | `02` flags 4 of 6 |
+
+`edge-cases.json` documents the limits of policy 02 explicitly:
+
+| Case | Flagged | Why |
+|---|---|---|
+| `ip_protocol: "-1"` with a `/8` | yes | `covers_ssh` treats all-protocols as covering 22 |
+| `tcp 1-65535` with a `/8` | yes | a range covering 22 counts |
+| `cidr_ipv6: ::/0` and `2001:db8::/64` | yes | v6 check requires `/128` |
+| `prefix_list_id` | **no** | deliberate — a prefix list is curated where it is defined |
+| `cidr_ipv4` unknown at plan time | **no** | unresolvable: computed values are `null` in `change.after` |
 
 **Two traps this suite exists to catch**, both found by running against the real plan rather than
 the hand-written one:
