@@ -6,7 +6,11 @@ applies the affected stack in HCP Terraform; AWS auth is OIDC dynamic credential
 `us-east-1` · Terraform `>= 1.12` · `hashicorp/aws ~> 6.0` · org `genie` · project
 `hc-vpc-peering-vcs-hcp` · **7 workspaces · 116 resources** · account `780344647951`
 
-![stack](images/13-vcs-driven-stack.png)
+![architecture](images/01-architecture.png)
+
+> Hand-drawn in Excalidraw, and the most complete view of the topology — route-table contents,
+> AMIs per tier, SG attachments, requester/accepter sides. Two label slips: the right-hand VPC is
+> `hc-backend-vpc`, and the region badges say Singapore while everything is built in `us-east-1`.
 
 ---
 
@@ -41,6 +45,8 @@ Two rules shape this split:
 ## Pipeline — VCS-driven
 
 No `terraform apply` is run by hand against any stack; VCS-connected workspaces refuse CLI applies.
+
+![stack](images/13-vcs-driven-stack.png)
 
 ```
 branch → commit in one stack folder → PR → speculative plan on that workspace
